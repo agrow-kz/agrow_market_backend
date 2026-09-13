@@ -8,20 +8,26 @@ from fastapi.security import HTTPAuthorizationCredentials as BearerCredentials
 from fastapi.security import HTTPBearer
 
 from src.configuration.dependencies.container import ApplicationContainer
-from src.core.customer.application.interfaces.uow import ICustomerUnitOfWork
-from src.core.iam.application.interfaces.uow import IIAMUnitOfWork
+from src.core.admin.domain.entities import Admin
+from src.core.admin.infrastructure.uow import AdminUnitOfWork
+from src.core.customer.infrastructure.uow import CustomerUnitOfWork
 from src.core.iam.domain.enums import TokenType
 from src.core.iam.domain.exceptions import (
     InvalidTokenError,
     InvalidTokenTypeError,
     TokenExpiredError,
 )
-from src.core.iam.infrastructure.services.pyjwt_token import ITokenService
+from src.core.iam.infrastructure.services.pyjwt_token import PyJWTTokenService
+from src.core.iam.infrastructure.uow import IAMUnitOfWork
 from src.core.shared.infrastructure.services.api_session_service import (
     APISessionService,
 )
-from src.core.shared.presentation.dto import CurrentCustomer, CurrentUser, CurrentVendor
-from src.core.vendor.application.interfaces.uow import IVendorUnitOfWork
+from src.core.shared.presentation.dto import (
+    CurrentCustomer,
+    CurrentUser,
+    CurrentVendor,
+)
+from src.core.vendor.infrastructure.uow import VendorUnitOfWork
 
 bearer_scheme = HTTPBearer(
     scheme_name="BearerAuth",
@@ -55,7 +61,7 @@ def get_from_auth_scheme(
 @inject
 async def get_current_user_id(
     token: Annotated[str, Depends(get_from_auth_scheme)],
-    token_service: ITokenService = Depends(
+    token_service: PyJWTTokenService = Depends(
         Provide[ApplicationContainer.iam.pyjwt_token_service]
     ),
 ) -> UUID:
@@ -82,12 +88,10 @@ async def get_current_user_id(
 
 @inject
 async def get_current_user(
-    unit_of_work: IIAMUnitOfWork = Depends(
-        Provide[ApplicationContainer.iam.iam_unit_of_work]
-    ),
+    uow: IAMUnitOfWork = Depends(Provide[ApplicationContainer.iam.uow]),
     account_id: UUID = Depends(get_current_user_id),
 ):
-    async with unit_of_work as uow:
+    async with uow:
         account = await uow.account.get_account_by_id(account_id)
 
         if not account:
@@ -103,7 +107,7 @@ async def get_current_user(
 @inject
 async def get_current_customer(
     unit_of_work: Annotated[
-        ICustomerUnitOfWork, Depends(Provide[ApplicationContainer.customer.uow])
+        CustomerUnitOfWork, Depends(Provide[ApplicationContainer.customer.uow])
     ],
     account: CurrentUser = Depends(get_current_user),
 ):
@@ -119,9 +123,7 @@ async def get_current_customer(
 
 @inject
 async def get_current_vendor(
-    uow: Annotated[
-        IVendorUnitOfWork, Depends(Provide[ApplicationContainer.vendor.uow])
-    ],
+    uow: Annotated[VendorUnitOfWork, Depends(Provide[ApplicationContainer.vendor.uow])],
     account: CurrentUser = Depends(get_current_user),
 ):
     async with uow:
@@ -134,3 +136,33 @@ async def get_current_vendor(
             )
 
         return CurrentVendor(id=vendor.id)
+
+
+@inject
+async def get_current_admin(
+    uow: Annotated[AdminUnitOfWork, Depends(Provide[ApplicationContainer.admin.uow])],
+    account: CurrentUser = Depends(get_current_user),
+):
+    async with uow:
+        admin = await uow.admin.get_by_account_id(account.id)
+        if not admin:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="У вас недостаточно прав доступа.",
+            )
+
+        return admin
+
+
+def require_admin(permission_code: str):
+    async def dependency(
+        admin: Admin = Depends(get_current_admin),
+    ) -> Admin:
+        if not admin.can(permission_code):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="У вас недостаточно прав доступа.",
+            )
+        return admin
+
+    return dependency
